@@ -1,7 +1,10 @@
 import logging
+import os
 import random
 import requests
 from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -12,6 +15,24 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+
+# =========================================================
+# RENDER 7/24 UYANIK TUTMA (WEB SERVER)
+# =========================================================
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot 7/24 Aktif Çalışıyor!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web_server)
+    t.daemon = True
+    t.start()
 
 # =========================================================
 # BOT TOKEN
@@ -208,7 +229,6 @@ def get_league_special_coupon(target_leagues, shuffle=False):
     league_name = target_leagues[0][1]
     all_upcoming = []
     
-    # Önümüzdeki 7 günü tara ve sadece bu lige ait maçları topla
     for i in range(7):
         dt = datetime.now() + timedelta(days=i)
         date_fmt = dt.strftime("%Y%m%d")
@@ -328,7 +348,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     text = update.message.text.strip()
     
-    # 1. Önce Lig İsmine Göre Sorgulama Yapıldı Mı Kontrol Et
     matched_leagues = find_league_by_keyword(text)
     if matched_leagues:
         league_display_name = matched_leagues[0][1]
@@ -337,7 +356,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         return
 
-    # 2. Genel Menü Butonları Kontrolü
     if text in ["🔥 Canlı Skorlar", "🔄 Yenile"]:
         await update.message.reply_text("🔄 Canlı skorlar sorgulanıyor...")
         result = get_live_scores()
@@ -349,7 +367,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
     else:
-        # 3. Tarih Sorgulaması Yapıldı Mı Kontrol Et
         date_api_fmt, display_date = parse_user_date(text)
         if date_api_fmt:
             await update.message.reply_text(f"🔄 <b>{display_date}</b> tarihi için analiz yapılıyor...")
@@ -387,6 +404,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ÇALIŞTIRMA
 # =========================================================
 def main():
+    # Render için arka planda web sunucusu başlat
+    keep_alive()
+    
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
