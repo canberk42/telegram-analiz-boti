@@ -1,7 +1,8 @@
 import logging
 import os
 import random
-import requests
+import asyncio
+import httpx
 from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
@@ -58,17 +59,15 @@ DAYS_TR = {
 
 # --- LİG VE KUPA TANIMLARI ---
 LEAGUES = [
-    ("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi"),
-    ("uefa.champions_league", "🇪🇺 UEFA Şampiyonlar Ligi"),
-    ("uefa.europa", "🇪🇺 UEFA Avrupa Ligi / 3. Eleme Turu"),
-    ("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi / 3. Eleme Turu"),
-    ("global", "🌐 Uluslararası / Avrupa Eleme Maçları"),
     ("tur.1", "🇹🇷 Trendyol Süper Lig"),
     ("eng.1", "🏴󠁧󠁢󠁥󠁮󠁧󠁿 İngiltere Premier League"),
     ("esp.1", "🇪🇸 İspanya La Liga"),
     ("ita.1", "🇮🇹 İtalya Serie A"),
     ("ger.1", "🇩🇪 Almanya Bundesliga"),
     ("fra.1", "🇫🇷 Fransa Ligue 1"),
+    ("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi"),
+    ("uefa.europa", "🇪🇺 UEFA Avrupa Ligi"),
+    ("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi"),
     ("ned.1", "🇳🇱 Hollanda Eredivisie"),
     ("por.1", "🇵🇹 Portekiz Liga Portugal"),
     ("tur.cup", "🇹🇷 Ziraat Türkiye Kupası"),
@@ -84,12 +83,12 @@ LEAGUE_KEYWORDS = {
     "süper lig": [("tur.1", "🇹🇷 Trendyol Süper Lig")],
     "super lig": [("tur.1", "🇹🇷 Trendyol Süper Lig")],
     "trendyol": [("tur.1", "🇹🇷 Trendyol Süper Lig")],
-    "avrupa ligi": [("uefa.europa", "🇪🇺 UEFA Avrupa Ligi / 3. Eleme Turu")],
-    "europa": [("uefa.europa", "🇪🇺 UEFA Avrupa Ligi / 3. Eleme Turu")],
-    "konferans": [("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi / 3. Eleme Turu")],
-    "konferans ligi": [("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi / 3. Eleme Turu")],
-    "şampiyonlar ligi": [("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi"), ("uefa.champions_league", "🇪🇺 UEFA Şampiyonlar Ligi")],
-    "champions league": [("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi"), ("uefa.champions_league", "🇪🇺 UEFA Şampiyonlar Ligi")],
+    "avrupa ligi": [("uefa.europa", "🇪🇺 UEFA Avrupa Ligi")],
+    "europa": [("uefa.europa", "🇪🇺 UEFA Avrupa Ligi")],
+    "konferans": [("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi")],
+    "konferans ligi": [("uefa.europa.conf", "🇪🇺 UEFA Konferans Ligi")],
+    "şampiyonlar ligi": [("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi")],
+    "champions league": [("uefa.champions", "🇪🇺 UEFA Şampiyonlar Ligi")],
     "premier lig": [("eng.1", "🏴󠁧󠁢󠁥󠁮󠁧󠁿 İngiltere Premier League")],
     "premier league": [("eng.1", "🏴󠁧󠁢󠁥󠁮󠁧󠁿 İngiltere Premier League")],
     "la liga": [("esp.1", "🇪🇸 İspanya La Liga")],
@@ -103,7 +102,7 @@ LEAGUE_KEYWORDS = {
 }
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
 }
 
@@ -129,7 +128,7 @@ def parse_user_date(text):
     elif text == "yarın":
         dt = today + timedelta(days=1)
         return dt.strftime("%Y%m%d"), dt.strftime("%d.%m.%Y")
-    elif text in ["dün"]:
+    elif text == "dün":
         dt = today - timedelta(days=1)
         return dt.strftime("%Y%m%d"), dt.strftime("%d.%m.%Y")
         
@@ -145,9 +144,6 @@ def parse_user_date(text):
             
     return None, None
 
-# =========================================================
-# LİG KONTROLÜ
-# =========================================================
 def find_league_by_keyword(text):
     text_clean = text.strip().lower()
     for keyword, league_tuples in LEAGUE_KEYWORDS.items():
@@ -156,90 +152,121 @@ def find_league_by_keyword(text):
     return None
 
 # =========================================================
-# VERİ ÇEKME FONKSİYONU
+# YÜKSEK PERFORMANSLI ASENKRON VERİ ÇEKME FONKSİYONU
 # =========================================================
-def fetch_scores(target_leagues=None, date_str=None):
-    all_matches = []
-    seen_matches = set()
-    
-    search_list = target_leagues if target_leagues else LEAGUES
-    
-    for league_code, league_name in search_list:
-        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
-        if date_str:
-            url += f"?dates={date_str}"
-            
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=4)
-            if res.status_code == 200:
-                data = res.json()
-                for event in data.get("events", []):
-                    event_id = event.get("id")
-                    if event_id in seen_matches:
-                        continue
-                    seen_matches.add(event_id)
+async def fetch_league_data(client, league_code, league_name, date_str=None):
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
+    params = {}
+    if date_str:
+        params["dates"] = date_str
+        
+    matches = []
+    try:
+        res = await client.get(url, params=params, headers=HEADERS, timeout=6.0)
+        if res.status_code == 200:
+            data = res.json()
+            for event in data.get("events", []):
+                raw_date = event.get("date", "")
+                formatted_date = "Tarih Bilgisi Yok"
+                if raw_date:
+                    try:
+                        dt = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
+                        # UTC'den Türkiye Saatine (+3 saat) dönüştürme
+                        dt = dt + timedelta(hours=3)
+                        day_en = dt.strftime("%A")
+                        day_tr = DAYS_TR.get(day_en, day_en)
+                        formatted_date = dt.strftime(f"%d.%m.%Y {day_tr} - %H:%M")
+                    except Exception:
+                        formatted_date = raw_date
+                
+                status = event.get("status", {}).get("type", {})
+                state = status.get("state", "pre")
+                detail = status.get("shortDetail", "Saat Yok")
+                
+                competitions = event.get("competitions", [])
+                if not competitions:
+                    continue
+                    
+                competitors = competitions[0].get("competitors", [])
+                if len(competitors) < 2:
+                    continue
+                    
+                # Ev sahibi ve Deplasman eşleştirmesi
+                home_team, away_team = "Ev Sahibi", "Deplasman"
+                home_score, away_score = "0", "0"
+                
+                for c in competitors:
+                    if c.get("homeAway") == "home":
+                        home_team = c.get("team", {}).get("displayName", "Ev Sahibi")
+                        home_score = c.get("score", "0")
+                    else:
+                        away_team = c.get("team", {}).get("displayName", "Deplasman")
+                        away_score = c.get("score", "0")
+                
+                matches.append({
+                    "id": event.get("id"),
+                    "league": league_name,
+                    "home": home_team,
+                    "away": away_team,
+                    "home_score": home_score,
+                    "away_score": away_score,
+                    "state": state,
+                    "detail": detail,
+                    "match_time": formatted_date
+                })
+    except Exception as e:
+        logger.warning(f"{league_code} veri çekme hatası: {e}")
+        
+    return matches
 
-                    raw_date = event.get("date", "")
-                    formatted_date = "Tarih Bilgisi Yok"
-                    if raw_date:
-                        try:
-                            dt = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
-                            day_en = dt.strftime("%A")
-                            day_tr = DAYS_TR.get(day_en, day_en)
-                            formatted_date = dt.strftime(f"%d.%m.%Y {day_tr} - %H:%M")
-                        except Exception:
-                            formatted_date = raw_date
+async def fetch_scores(target_leagues=None, date_str=None):
+    search_list = target_leagues if target_leagues else LEAGUES
+    all_matches = []
+    seen_ids = set()
+    
+    async with httpx.AsyncClient() as client:
+        tasks = [
+            fetch_league_data(client, code, name, date_str) 
+            for code, name in search_list
+        ]
+        results = await asyncio.gather(*tasks)
+        
+        for match_list in results:
+            for m in match_list:
+                if m["id"] not in seen_ids:
+                    seen_ids.add(m["id"])
+                    all_matches.append(m)
                     
-                    status = event.get("status", {}).get("type", {})
-                    state = status.get("state", "pre")
-                    detail = status.get("shortDetail", "Saat Yok")
-                    
-                    competitions = event.get("competitions", [])
-                    if not competitions:
-                        continue
-                        
-                    competitors = competitions[0].get("competitors", [])
-                    if len(competitors) < 2:
-                        continue
-                        
-                    home_team = competitors[0].get("team", {}).get("displayName", "Ev Sahibi")
-                    home_score = competitors[0].get("score", "0")
-                    away_team = competitors[1].get("team", {}).get("displayName", "Deplasman")
-                    away_score = competitors[1].get("score", "0")
-                    
-                    all_matches.append({
-                        "league": league_name,
-                        "home": home_team,
-                        "away": away_team,
-                        "home_score": home_score,
-                        "away_score": away_score,
-                        "state": state,
-                        "detail": detail,
-                        "match_time": formatted_date
-                    })
-        except Exception as e:
-            logger.warning(f"{league_code} çekilemedi: {e}")
-            
     return all_matches
 
 # =========================================================
-# SADECE SEÇİLEN LİGE ÖZEL KUPON OLUŞTURMA
+# LİGE ÖZEL KUPON OLUŞTURMA (7 Günlük Esnek Tarama)
 # =========================================================
-def get_league_special_coupon(target_leagues, shuffle=False):
+async def get_league_special_coupon(target_leagues, shuffle=False):
     league_name = target_leagues[0][1]
     all_upcoming = []
     
-    for i in range(7):
-        dt = datetime.now() + timedelta(days=i)
-        date_fmt = dt.strftime("%Y%m%d")
-        matches = fetch_scores(target_leagues=target_leagues, date_str=date_fmt)
-        upcoming = [m for m in matches if m["state"] == "pre"]
-        all_upcoming.extend(upcoming)
-        if len(all_upcoming) >= 5:
-            break
+    # 7 günün tamamını paralel olarak sorguluyoruz (Süper hızlı)
+    today = datetime.now()
+    dates_to_check = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(10)]
+    
+    async with httpx.AsyncClient() as client:
+        tasks = []
+        for d in dates_to_check:
+            for code, name in target_leagues:
+                tasks.append(fetch_league_data(client, code, name, d))
+                
+        results = await asyncio.gather(*tasks)
+        
+        seen_ids = set()
+        for match_list in results:
+            for m in match_list:
+                if m["id"] not in seen_ids and m["state"] == "pre":
+                    seen_ids.add(m["id"])
+                    all_upcoming.append(m)
 
     if not all_upcoming:
-        return f"🎫 <b>{league_name.upper()} ÖZEL KUPONU</b>\n\nÖnümüzdeki 7 gün içinde bu ligde analiz edilecek maç bulunamadı.", None
+        return f"🎫 <b>{league_name.upper()} ÖZEL KUPONU</b>\n\nÖnümüzdeki 10 gün içinde bu ligde henüz bültene girmiş yaklaşan maç bulunamadı.", None
 
     if shuffle:
         random.shuffle(all_upcoming)
@@ -248,7 +275,7 @@ def get_league_special_coupon(target_leagues, shuffle=False):
     selected = all_upcoming[:count]
 
     output = f"🎫 <b>{league_name.upper()} ÖZEL KUPONU ({len(selected)} Maç)</b>\n"
-    output += f"🎯 <i>Sadece {league_name} ligine özel hazırlanan yüksek ihtimalli analizler:</i>\n\n"
+    output += f"🎯 <i>Sadece {league_name} ligine özel verilerle hazırlanan analizler:</i>\n\n"
 
     for idx, m in enumerate(selected):
         tip_info = random.choice(HIGH_PROBABILITY_TIPS) if shuffle else HIGH_PROBABILITY_TIPS[idx % len(HIGH_PROBABILITY_TIPS)]
@@ -262,18 +289,28 @@ def get_league_special_coupon(target_leagues, shuffle=False):
     return output, None
 
 # =========================================================
-# 5 GÜNLÜK ESNEK EN İYİ MAÇ ANALİZİ (GENEL)
+# GENEL YAKIN ZAMAN MAÇ ANALİZİ
 # =========================================================
-def get_near_future_best_matches(shuffle=False):
-    all_upcoming = []
+async def get_near_future_best_matches(shuffle=False):
+    today = datetime.now()
+    dates_to_check = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(5)]
     
-    for i in range(5):
-        dt = datetime.now() + timedelta(days=i)
-        date_fmt = dt.strftime("%Y%m%d")
-        matches = fetch_scores(date_str=date_fmt)
+    all_upcoming = []
+    seen_ids = set()
+    
+    async with httpx.AsyncClient() as client:
+        tasks = []
+        for d in dates_to_check:
+            for code, name in LEAGUES:
+                tasks.append(fetch_league_data(client, code, name, d))
+                
+        results = await asyncio.gather(*tasks)
         
-        upcoming = [m for m in matches if m["state"] == "pre"]
-        all_upcoming.extend(upcoming)
+        for match_list in results:
+            for m in match_list:
+                if m["id"] not in seen_ids and m["state"] == "pre":
+                    seen_ids.add(m["id"])
+                    all_upcoming.append(m)
 
     if not all_upcoming:
         return "⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN EN İYİ MAÇLARI</b>\n\nÖnümüzdeki 5 gün içinde analiz edilecek uygun maç bulunamadı.", None
@@ -282,10 +319,10 @@ def get_near_future_best_matches(shuffle=False):
         random.shuffle(all_upcoming)
 
     match_count = len(all_upcoming)
-    selected_count = random.randint(4, 7) if match_count >= 6 else match_count
+    selected_count = random.randint(4, 6) if match_count >= 6 else match_count
     selected = all_upcoming[:selected_count]
 
-    output = f"⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN TUTMA İHTİMALİ EN YÜKSEK MAÇLARI ({len(selected)} Maç)</b>\n\n"
+    output = f"⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN EN İYİ MAÇLARI ({len(selected)} Maç)</b>\n\n"
 
     for idx, m in enumerate(selected):
         tip_info = random.choice(HIGH_PROBABILITY_TIPS) if shuffle else HIGH_PROBABILITY_TIPS[idx % len(HIGH_PROBABILITY_TIPS)]
@@ -293,8 +330,8 @@ def get_near_future_best_matches(shuffle=False):
         output += f"⚽ <b>{m['home']} vs {m['away']}</b>\n"
         output += f"🏆 <i>{m['league']}</i>\n"
         output += f"📅 Tarih/Saat: <code>{m['match_time']}</code>\n"
-        output += f"💡 <b>Yüksek İhtimalli Tahmin:</b> <code>{tip_info['tip']}</code>\n"
-        output += f"📈 <b>Tahmini Oran:</b> {tip_info['rate']} | 🎯 <b>Tutma Olasılığı:</b> <code>{tip_info['confidence']}</code>\n"
+        output += f"💡 <b>Tahmin:</b> <code>{tip_info['tip']}</code>\n"
+        output += f"📈 <b>Oran:</b> {tip_info['rate']} | 🎯 <b>Güven:</b> <code>{tip_info['confidence']}</code>\n"
         output += "-----------------------------------\n"
 
     keyboard = [[InlineKeyboardButton("🔄 Farklı Maçları İncele / Yenile", callback_data="refresh_near_matches")]]
@@ -305,8 +342,8 @@ def get_near_future_best_matches(shuffle=False):
 # =========================================================
 # CANLI SKORLAR
 # =========================================================
-def get_live_scores():
-    matches = fetch_scores()
+async def get_live_scores():
+    matches = await fetch_scores()
     live_matches = [m for m in matches if m["state"] == "in"]
     
     if live_matches:
@@ -336,8 +373,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚽ <b>SAHA ANALİZ VE LİG ÖZEL KUPON BOTU!</b>\n\n"
         "💡 <b>Nasıl Kullanılır?</b>\n"
-        "• Aşağıdaki butonlara basarak veya doğrudan sohbet alanına **'Süper Lig'**, **'Avrupa Ligi'**, **'Premier Lig'**, **'La Liga'** yazarak **sadece o lige özel kupon** alabilirsin.\n"
-        "• Ya da **'Yarın'**, **'Bugün'** veya **'15.08.2026'** yazarak günün tüm maçlarını sorgulayabilirsin.",
+        "• Butonlara tıklayarak veya sohbet alanına **'Süper Lig'**, **'Avrupa Ligi'**, **'Premier Lig'**, **'La Liga'** yazarak lige özel analiz alabilirsin.\n"
+        "• Veya **'Yarın'**, **'Bugün'** yazarak günün maçlarını listeleyebilirsin.",
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML
     )
@@ -351,60 +388,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matched_leagues = find_league_by_keyword(text)
     if matched_leagues:
         league_display_name = matched_leagues[0][1]
-        await update.message.reply_text(f"🔄 <b>{league_display_name}</b> taranıyor, sadece bu lige özel kupon hazırlanıyor...")
-        result, reply_markup = get_league_special_coupon(matched_leagues)
-        await update.message.reply_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        msg = await update.message.reply_text(f"🔄 <b>{league_display_name}</b> taranıyor, analizler hazırlanıyor...")
+        result, reply_markup = await get_league_special_coupon(matched_leagues)
+        await msg.edit_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         return
 
     if text in ["🔥 Canlı Skorlar", "🔄 Yenile"]:
-        await update.message.reply_text("🔄 Canlı skorlar sorgulanıyor...")
-        result = get_live_scores()
-        await update.message.reply_text(result, parse_mode=ParseMode.HTML)
+        msg = await update.message.reply_text("🔄 Canlı skorlar sorgulanıyor...")
+        result = await get_live_scores()
+        await msg.edit_text(result, parse_mode=ParseMode.HTML)
 
     elif text in ["⚡ Genel En İyi Maçlar (5 Gün)", "⚡ Yakın Zamanın En İyi Maçları"]:
-        await update.message.reply_text("🔄 Tüm ligler taranıyor, en iyi maçlar analiz ediliyor...")
-        result, reply_markup = get_near_future_best_matches()
-        await update.message.reply_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        msg = await update.message.reply_text("🔄 Tüm ligler taranıyor, en iyi maçlar analiz ediliyor...")
+        result, reply_markup = await get_near_future_best_matches()
+        await msg.edit_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
     else:
         date_api_fmt, display_date = parse_user_date(text)
         if date_api_fmt:
-            await update.message.reply_text(f"🔄 <b>{display_date}</b> tarihi için analiz yapılıyor...")
-            matches = fetch_scores(date_str=date_api_fmt)
+            msg = await update.message.reply_text(f"🔄 <b>{display_date}</b> tarihi için analiz yapılıyor...")
+            matches = await fetch_scores(date_str=date_api_fmt)
             if not matches:
-                await update.message.reply_text(f"📆 <b>{display_date}</b> tarihinde maç bulunamadı.")
+                await msg.edit_text(f"📆 <b>{display_date}</b> tarihinde maç bulunamadı.")
                 return
                 
             output = f"📆 <b>{display_date} TARİHLİ MAÇLAR VE ANALİZLER</b>\n\n"
-            for m in matches[:6]:
+            for m in matches[:8]:
                 tip_info = random.choice(HIGH_PROBABILITY_TIPS)
                 output += f"⚽ <b>{m['home']} vs {m['away']}</b> ({m['league']})\n"
                 output += f"📅 Saat: <code>{m['match_time']}</code>\n"
                 output += f"💡 Tahmin: <code>{tip_info['tip']}</code> (Güven: {tip_info['confidence']})\n"
                 output += "-----------------------------------\n"
-            await update.message.reply_text(output, parse_mode=ParseMode.HTML)
+            await msg.edit_text(output, parse_mode=ParseMode.HTML)
         else:
             await update.message.reply_text(
-                "❓ Komut anlaşılamadı. Bir lig ismi yazabilirsiniz (Örn: <b>Süper Lig</b>, <b>Avrupa Ligi</b>, <b>La Liga</b>, <b>Premier League</b>) veya tarih belirtebilirsiniz (Örn: <b>Yarın</b>).",
+                "❓ Komut anlaşılamadı. Bir lig ismi (Örn: <b>Süper Lig</b>, <b>La Liga</b>) veya tarih (Örn: <b>Yarın</b>) yazabilirsin.",
                 parse_mode=ParseMode.HTML
             )
 
-# =========================================================
-# CALLBACK HANDLER
-# =========================================================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("🔄 Yenileniyor...")
 
     if query.data == "refresh_near_matches":
-        result, reply_markup = get_near_future_best_matches(shuffle=True)
+        result, reply_markup = await get_near_future_best_matches(shuffle=True)
         await query.edit_message_text(result, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 # =========================================================
 # ÇALIŞTIRMA
 # =========================================================
 def main():
-    # Render için uyanık tutma sunucusunu başlat
     keep_alive()
     
     app = ApplicationBuilder().token(TOKEN).build()
@@ -413,8 +446,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     
-    print("🚀 Bot Lig Özel Kupon Sistemi ile Çalışıyor!")
-    # drop_pending_updates=True ile takılan eski güncellemeleri temizle
+    print("🚀 Bot Yüksek Hızlı Asenkron Sistem ile Çalışıyor!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
