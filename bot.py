@@ -46,7 +46,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Türkçe Gün İsimleri
 DAYS_TR = {
     "Monday": "Pazartesi",
     "Tuesday": "Salı",
@@ -57,7 +56,6 @@ DAYS_TR = {
     "Sunday": "Pazar"
 }
 
-# --- LİG VE KUPA TANIMLARI ---
 LEAGUES = [
     ("tur.1", "🇹🇷 Trendyol Süper Lig"),
     ("eng.1", "🏴󠁧󠁢󠁥󠁮󠁧󠁿 İngiltere Premier League"),
@@ -78,7 +76,6 @@ LEAGUES = [
     ("fra.coupe_de_france", "🇫🇷 Fransa Kupası")
 ]
 
-# METİN ARAMALARINDA LİG EŞLEŞTİRME ANAHTARLARI
 LEAGUE_KEYWORDS = {
     "süper lig": [("tur.1", "🇹🇷 Trendyol Süper Lig")],
     "super lig": [("tur.1", "🇹🇷 Trendyol Süper Lig")],
@@ -106,7 +103,6 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-# HIGH TUTMA OLASILIKLI (BANKO) TAHMİN HAVUZU
 HIGH_PROBABILITY_TIPS = [
     {"tip": "🔥 1.5 Gol Üstü", "rate": "1.22 - 1.28", "confidence": "%95"},
     {"tip": "🛡️ Ev Sahibi / Deplasman Çifte Şans", "rate": "1.25 - 1.32", "confidence": "%93"},
@@ -116,9 +112,6 @@ HIGH_PROBABILITY_TIPS = [
     {"tip": "🎯 2.5 Gol Üstü", "rate": "1.45 - 1.55", "confidence": "%87"}
 ]
 
-# =========================================================
-# TARİH AYRIŞTIRICI
-# =========================================================
 def parse_user_date(text):
     text = text.strip().lower()
     today = datetime.now()
@@ -152,7 +145,7 @@ def find_league_by_keyword(text):
     return None
 
 # =========================================================
-# YÜKSEK PERFORMANSLI ASENKRON VERİ ÇEKME FONKSİYONU
+# GELİŞMİŞ VERİ ÇEKME FONKSİYONU (TARİH ARALIĞI DESTEKLİ)
 # =========================================================
 async def fetch_league_data(client, league_code, league_name, date_str=None):
     url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league_code}/scoreboard"
@@ -162,7 +155,7 @@ async def fetch_league_data(client, league_code, league_name, date_str=None):
         
     matches = []
     try:
-        res = await client.get(url, params=params, headers=HEADERS, timeout=6.0)
+        res = await client.get(url, params=params, headers=HEADERS, timeout=8.0)
         if res.status_code == 200:
             data = res.json()
             for event in data.get("events", []):
@@ -171,8 +164,7 @@ async def fetch_league_data(client, league_code, league_name, date_str=None):
                 if raw_date:
                     try:
                         dt = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
-                        # UTC'den Türkiye Saatine (+3 saat) dönüştürme
-                        dt = dt + timedelta(hours=3)
+                        dt = dt + timedelta(hours=3) # TSI
                         day_en = dt.strftime("%A")
                         day_tr = DAYS_TR.get(day_en, day_en)
                         formatted_date = dt.strftime(f"%d.%m.%Y {day_tr} - %H:%M")
@@ -191,7 +183,6 @@ async def fetch_league_data(client, league_code, league_name, date_str=None):
                 if len(competitors) < 2:
                     continue
                     
-                # Ev sahibi ve Deplasman eşleştirmesi
                 home_team, away_team = "Ev Sahibi", "Deplasman"
                 home_score, away_score = "0", "0"
                 
@@ -240,33 +231,28 @@ async def fetch_scores(target_leagues=None, date_str=None):
     return all_matches
 
 # =========================================================
-# LİGE ÖZEL KUPON OLUŞTURMA (7 Günlük Esnek Tarama)
+# LİGE ÖZEL KUPON OLUŞTURMA
 # =========================================================
 async def get_league_special_coupon(target_leagues, shuffle=False):
     league_name = target_leagues[0][1]
-    all_upcoming = []
     
-    # 7 günün tamamını paralel olarak sorguluyoruz (Süper hızlı)
-    today = datetime.now()
-    dates_to_check = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(10)]
+    # Bugün ile 10 gün sonrasının tarih aralığı (Tek İstek)
+    start_dt = datetime.now()
+    end_dt = start_dt + timedelta(days=10)
+    range_str = f"{start_dt.strftime('%Y%m%d')}-{end_dt.strftime('%Y%m%d')}"
     
-    async with httpx.AsyncClient() as client:
-        tasks = []
-        for d in dates_to_check:
-            for code, name in target_leagues:
-                tasks.append(fetch_league_data(client, code, name, d))
-                
-        results = await asyncio.gather(*tasks)
-        
-        seen_ids = set()
-        for match_list in results:
-            for m in match_list:
-                if m["id"] not in seen_ids and m["state"] == "pre":
-                    seen_ids.add(m["id"])
-                    all_upcoming.append(m)
+    matches = await fetch_scores(target_leagues=target_leagues, date_str=range_str)
+    
+    # Oynanmamış (gelecek) maçları filtrele
+    all_upcoming = [m for m in matches if m["state"] == "pre"]
 
     if not all_upcoming:
-        return f"🎫 <b>{league_name.upper()} ÖZEL KUPONU</b>\n\nÖnümüzdeki 10 gün içinde bu ligde henüz bültene girmiş yaklaşan maç bulunamadı.", None
+        # Eğer belirtilen tarih aralığında yoksa varsayılan bülteni çek
+        matches_default = await fetch_scores(target_leagues=target_leagues)
+        all_upcoming = [m for m in matches_default if m["state"] == "pre"]
+
+    if not all_upcoming:
+        return f"🎫 <b>{league_name.upper()} ÖZEL KUPONU</b>\n\nBu ligde şu anda bültende yakın tarihli maç bulunamadı.", None
 
     if shuffle:
         random.shuffle(all_upcoming)
@@ -289,31 +275,23 @@ async def get_league_special_coupon(target_leagues, shuffle=False):
     return output, None
 
 # =========================================================
-# GENEL YAKIN ZAMAN MAÇ ANALİZİ
+# GENEL YAKIN ZAMAN MAÇ ANALİZİ (ÖNÜMÜZDEKİ 5-7 GÜN)
 # =========================================================
 async def get_near_future_best_matches(shuffle=False):
-    today = datetime.now()
-    dates_to_check = [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(5)]
+    start_dt = datetime.now()
+    end_dt = start_dt + timedelta(days=7)
+    range_str = f"{start_dt.strftime('%Y%m%d')}-{end_dt.strftime('%Y%m%d')}"
     
-    all_upcoming = []
-    seen_ids = set()
-    
-    async with httpx.AsyncClient() as client:
-        tasks = []
-        for d in dates_to_check:
-            for code, name in LEAGUES:
-                tasks.append(fetch_league_data(client, code, name, d))
-                
-        results = await asyncio.gather(*tasks)
-        
-        for match_list in results:
-            for m in match_list:
-                if m["id"] not in seen_ids and m["state"] == "pre":
-                    seen_ids.add(m["id"])
-                    all_upcoming.append(m)
+    matches = await fetch_scores(date_str=range_str)
+    all_upcoming = [m for m in matches if m["state"] == "pre"]
+
+    # Eğer tarih aralığından boş dönerse direkt güncel lig haftası bültenini çek
+    if not all_upcoming:
+        matches_default = await fetch_scores()
+        all_upcoming = [m for m in matches_default if m["state"] == "pre"]
 
     if not all_upcoming:
-        return "⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN EN İYİ MAÇLARI</b>\n\nÖnümüzdeki 5 gün içinde analiz edilecek uygun maç bulunamadı.", None
+        return "⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN EN İYİ MAÇLARI</b>\n\nŞu anda analiz edilebilecek bültende maç bulunamadı.", None
 
     if shuffle:
         random.shuffle(all_upcoming)
@@ -322,7 +300,7 @@ async def get_near_future_best_matches(shuffle=False):
     selected_count = random.randint(4, 6) if match_count >= 6 else match_count
     selected = all_upcoming[:selected_count]
 
-    output = f"⚡ <b>ÖNÜMÜZDEKİ 5 GÜNÜN EN İYİ MAÇLARI ({len(selected)} Maç)</b>\n\n"
+    output = f"⚡ <b>ÖNÜMÜZDEKİ 5-7 GÜNÜN EN İYİ MAÇLARI ({len(selected)} Maç)</b>\n\n"
 
     for idx, m in enumerate(selected):
         tip_info = random.choice(HIGH_PROBABILITY_TIPS) if shuffle else HIGH_PROBABILITY_TIPS[idx % len(HIGH_PROBABILITY_TIPS)]
