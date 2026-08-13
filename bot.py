@@ -404,7 +404,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ÇALIŞTIRMA
 # =========================================================
 def main():
-    # Render için arka planda web sunucusu başlat
+    # Render için uyanık tutma sunucusunu başlat
     keep_alive()
     
     app = ApplicationBuilder().token(TOKEN).build()
@@ -414,7 +414,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     
     print("🚀 Bot Lig Özel Kupon Sistemi ile Çalışıyor!")
-    app.run_polling()
+    # drop_pending_updates=True ile takılan eski güncellemeleri temizle
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
