@@ -37,7 +37,7 @@ def keep_alive():
 # =========================================================
 # BOT TOKEN
 # =========================================================
-TOKEN = "8950290339:AAH7y1v97DIMWuIWEOsIKCS5PI52wGVKhS8"
+TOKEN = "8801572175:AAFAUufBhit3lJDgl8NN76DcSmun3ht4K0c"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
